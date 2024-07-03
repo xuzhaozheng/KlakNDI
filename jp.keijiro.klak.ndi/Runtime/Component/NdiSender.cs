@@ -1,3 +1,12 @@
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using Klak.Ndi.Audio;
+#if OSC_JACK
+using OscJack;
+#endif
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -55,6 +64,387 @@ public sealed partial class NdiSender : MonoBehaviour
     }
 
     #endregion
+    
+    #region Sound Sender
+    
+    private AudioListenerBridge _audioListenerBridge;
+    private int numSamples = 0;
+    private int numChannels = 0;
+    private float[] samples = new float[1];
+    private int sampleRate = 44100;
+    private AudioMode _audioMode;
+    private Vector3 _listenerPosition;
+    private object _lockObj = new object();
+    private IntPtr _metaDataPtr = IntPtr.Zero;
+    private float[] _channelVisualisations;
+    private object _channelVisualisationsLock = new object();
+    private object _channelObjectLock = new object();
+    private List<NativeArray<float>> _objectBasedChannels = new List<NativeArray<float>>();
+    private List<Vector3> _objectBasedPositions = new List<Vector3>();
+    private List<float> _objectBasedGains = new List<float>();
+    
+#if UNITY_EDITOR
+    private void OnDrawGizmosSelected()
+    {
+        if (!Application.isPlaying)
+            return;
+        
+        var listenersPositions = VirtualAudio.GetListenersPositions();
+        var listenerVolumes = VirtualAudio.GetListenersVolume();
+        Gizmos.color = Color.yellow;
+        int listIndex = 0;
+        foreach (var listener in listenersPositions)
+        {
+            Gizmos.DrawWireSphere(transform.position + listener, 1f);
+            // Add text label
+            UnityEditor.Handles.Label(transform.position + listener + new Vector3(2f, 0, 0f), "Channel: "+listIndex+ System.Environment.NewLine + "Volume: "+listenerVolumes[listIndex]);
+            listIndex++;
+        }
+    }
+#endif
+
+    private void CheckAudioListener(bool willBeActive)
+    {
+        if (!Application.isPlaying)
+            return;
+        
+        if (willBeActive && !GetComponent<AudioListener>() && !_audioListenerBridge)
+        {
+            var audioListener = FindObjectOfType<AudioListener>();
+            if (!audioListener)
+            {
+                Debug.LogError("No AudioListener found in scene. Please add an AudioListener to the scene.");
+                return;
+            }
+            
+            _audioListenerBridge = audioListener.gameObject.AddComponent<AudioListenerBridge>();
+        }
+        if (!willBeActive && _audioListenerBridge)
+            Util.Destroy(_audioListenerBridge);
+        
+        if (willBeActive && _audioListenerBridge)
+            AudioListenerBridge.OnAudioFilterReadEvent = OnAudioFilterRead;
+    }
+    
+    private void ClearVirtualSpeakerListeners()
+    {
+        VirtualAudio.UseVirtualAudio = false;
+        VirtualAudio.ActivateObjectBasedAudio(false);
+
+        VirtualAudio.ClearAllVirtualSpeakerListeners();
+    }
+    
+    private void CreateAudioSetup_Quad()
+    {
+        VirtualAudio.UseVirtualAudio = true;
+        VirtualAudio.ClearAllVirtualSpeakerListeners();
+
+        float distance = virtualListenerDistance;
+        VirtualAudio.AddListener( new Vector3(-distance, 0f, distance), 1f);
+        VirtualAudio.AddListener( new Vector3(distance, 0f, distance), 1f);
+        
+        VirtualAudio.AddListener( new Vector3(-distance, 0f, -distance), 1f);
+        VirtualAudio.AddListener( new Vector3(distance, 0f, -distance), 1f);
+    }    
+    
+    private void CreateAudioSetup_5point1()
+    {
+        VirtualAudio.UseVirtualAudio = true;
+        VirtualAudio.ClearAllVirtualSpeakerListeners();
+
+        float distance = virtualListenerDistance;
+        VirtualAudio.AddListener( new Vector3(-distance, 0f, distance), 1f);
+        VirtualAudio.AddListener( new Vector3(distance, 0f, distance), 1f);
+        
+        VirtualAudio.AddListener( new Vector3(0f, 0f, distance), 1f);
+        VirtualAudio.AddListener( new Vector3(0f, 0f, 0f), 0f);
+        
+        VirtualAudio.AddListener( new Vector3(-distance, 0f, -distance), 1f);
+        VirtualAudio.AddListener( new Vector3(distance, 0f, -distance), 1f);
+    }
+
+    private void CreateAudioSetup_7point1()
+    {
+        VirtualAudio.UseVirtualAudio = true;
+        VirtualAudio.ClearAllVirtualSpeakerListeners();
+
+        float distance = virtualListenerDistance;
+        VirtualAudio.AddListener( new Vector3(-distance, 0f, distance), 1f);
+        VirtualAudio.AddListener( new Vector3(distance, 0f, distance), 1f);
+        
+        VirtualAudio.AddListener( new Vector3(0f, 0f, distance), 1f);
+        VirtualAudio.AddListener( new Vector3(0f, 0f, 0f), 0f);
+
+        VirtualAudio.AddListener( new Vector3(-distance, 0f, 0), 1f);
+        VirtualAudio.AddListener( new Vector3(distance, 0f, 0), 1f);
+        
+        VirtualAudio.AddListener( new Vector3(-distance, 0f, -distance), 1f);
+        VirtualAudio.AddListener( new Vector3(distance, 0f, -distance), 1f);
+    }
+
+    private void CreateAudioSetup_32Array()
+    {
+        VirtualAudio.UseVirtualAudio = true;
+        VirtualAudio.ClearAllVirtualSpeakerListeners();
+        
+        for (int i = 0; i < 32; i++)
+        {
+            // Add 32 virtual speakers in a circle around the listener
+            float angle = i * Mathf.PI * 2 / 32;
+            float x = Mathf.Sin(angle) * virtualListenerDistance;
+            float z = Mathf.Cos(angle) * virtualListenerDistance;
+            VirtualAudio.AddListener(new Vector3(x, 0f, z), 1f);
+        }
+    }
+
+    private void CreateAudioSetup_bySpeakerConfig()
+    {
+        VirtualAudio.ClearAllVirtualSpeakerListeners();
+        if (!customSpeakerConfig)
+        {
+            Debug.LogError("No custom speaker config assigned!");
+            return;
+        }
+        VirtualAudio.UseVirtualAudio = true;
+
+        var allSpeakers = customSpeakerConfig.GetAllSpeakers();
+        for (int i = 0; i < allSpeakers.Length; i++)
+        {
+            VirtualAudio.AddListener(allSpeakers[i].position, allSpeakers[i].volume);
+        }
+    }
+    
+    private void Update()
+    {
+        lock (_lockObj)
+        {
+            _listenerPosition = transform.position;
+        }
+
+        if (audioMode != AudioMode.CustomVirtualAudioSetup)
+            VirtualAudio.PlayCenteredAudioSourceOnAllListeners = playCenteredAudioSourcesOnAllSpeakers;
+        if (_audioMode != audioMode || _lastVirtualListenerDistance != virtualListenerDistance)
+        {
+            ResetState();
+        }
+    }
+
+    private void LateUpdate()
+    {
+        VirtualAudio.UpdateAudioSourceToListenerWeights( _listenerPosition, useCameraPositionForVirtualAttenuation);
+    }
+
+    public float[] GetChannelVisualisations()
+    {
+        lock (_channelVisualisationsLock)
+            return _channelVisualisations;
+    }
+    
+    internal Vector3[] GetChannelObjectPositions()
+    {
+        lock (_channelObjectLock)
+            return _objectBasedPositions.ToArray();
+    }
+
+    private void OnAudioFilterRead(float[] data, int channels)
+    {
+        if (_audioMode == AudioMode.AudioListener)
+        {
+            SendAudioListenerData(data, channels);
+        }
+        else
+        if (_audioMode == AudioMode.ObjectBased)
+        {
+            SendObjectBasedChannels();
+        }
+        else if (VirtualAudio.UseVirtualAudio)
+        {
+            SendCustomListenerData();
+        }
+    }
+
+    private void SendObjectBasedChannels()
+    {
+        lock (_channelObjectLock)
+        {
+            bool hasDataToSend = VirtualAudio.GetObjectBasedAudio(out var stream, out int samplesCount, _objectBasedChannels, _objectBasedPositions, _objectBasedGains);
+            if (!hasDataToSend)
+            {
+                lock (_channelVisualisationsLock)
+                    if (_channelVisualisations != null)
+                        Array.Fill(_channelVisualisations, 0f);
+                SendChannels(stream, samplesCount, _objectBasedChannels.Count, true);
+                return;
+            }
+
+            lock (_channelVisualisationsLock)
+            {
+                if (_channelVisualisations == null || _channelVisualisations.Length != _objectBasedChannels.Count)
+                    _channelVisualisations = new float[_objectBasedChannels.Count];
+
+                unsafe
+                {
+                    for (int i = 0; i < _channelVisualisations.Length; i++)
+                    {
+                        if (_objectBasedChannels[i].IsCreated && _objectBasedChannels[i].Length > 0)
+                        {
+                            BurstMethods.GetVU((float*)_objectBasedChannels[i].GetUnsafePtr(), _objectBasedChannels[i].Length, out float vu);
+                            _channelVisualisations[i] = vu;
+                        }
+                        else
+                            _channelVisualisations[i] = 0;
+                    }
+                }
+            }
+            
+            var admData = new AdmData();
+            admData.positions = _objectBasedPositions;
+            admData.gains = _objectBasedGains;
+            lock (_admEventLock)
+                _onAdmDataChanged?.Invoke(admData);
+            
+            SendChannels(stream, samplesCount, _objectBasedChannels.Count, true);
+        }
+    }
+    
+    private void SendChannels(NativeArray<float> stream, int samplesCount, int channelsCount, bool forceUpdateMetaData = false)
+    {
+        unsafe
+        {
+            bool settingsChanged = false;
+            int tempSamples = samplesCount;
+
+            if (tempSamples != numSamples)
+            {
+                settingsChanged = true;
+                numSamples = tempSamples;
+                
+            }
+
+            if (channelsCount != numChannels)
+            {
+                settingsChanged = true;
+                numChannels = channelsCount;
+            }
+
+            if (settingsChanged || forceUpdateMetaData)
+            {
+                UpdateAudioMetaData();
+            }
+
+
+            unsafe
+            {
+                if (!stream.IsCreated || stream.Length == 0)
+                    return;
+                
+                var frame = new Interop.AudioFrame
+                {
+                    SampleRate = sampleRate,
+                    NoChannels = channelsCount,
+                    NoSamples = numSamples,
+                    ChannelStrideInBytes = numSamples * sizeof(float),
+                    Data =  (System.IntPtr)stream.GetUnsafePtr()
+                };
+                
+                frame._Metadata = _metaDataPtr;
+
+                if (_send != null && !_send.IsInvalid && !_send.IsClosed)
+                {
+                    _send.SendAudio(frame);
+                }
+            }
+        }
+    }
+
+    private void SendCustomListenerData()
+    {
+        var mixedAudio = VirtualAudio.GetMixedAudio(out var stream, out int samplesCount, out var tmpVus);
+        lock (_channelVisualisationsLock)
+        {
+            if (_channelVisualisations == null || _channelVisualisations.Length != tmpVus.Length)
+                _channelVisualisations = new float[tmpVus.Length];
+            Array.Copy(tmpVus, _channelVisualisations, tmpVus.Length);
+        }
+        
+        SendChannels(stream, samplesCount, mixedAudio.Count);
+    }
+
+    private void UpdateAudioMetaData()
+    {
+        if (_metaDataPtr != IntPtr.Zero)
+        {
+            Marshal.FreeCoTaskMem(_metaDataPtr);
+            _metaDataPtr = IntPtr.Zero;
+        }
+        
+        var xml = _audioMode == AudioMode.ObjectBased ? 
+            AudioMeta.GenerateObjectBasedConfigXmlMetaData(_objectBasedPositions, _objectBasedGains) 
+            : AudioMeta.GenerateSpeakerConfigXmlMetaData();
+        
+        _metaDataPtr = Marshal.StringToCoTaskMemAnsi(xml);    
+    }
+    
+    private void SendAudioListenerData(float[] data, int channels)
+    {
+        if (data.Length == 0 || channels == 0) return;
+
+        unsafe
+        {
+            bool settingsChanged = false;
+            int tempSamples = data.Length / channels;
+
+            if (tempSamples != numSamples)
+            {
+                settingsChanged = true;
+                numSamples = tempSamples;
+                //PluginEntry.SetNumSamples(_plugin, numSamples);
+            }
+
+            if (channels != numChannels)
+            {
+                settingsChanged = true;
+                numChannels = channels;
+                //PluginEntry.SetAudioChannels(_plugin, channels);
+            }
+
+            if (settingsChanged)
+            {
+                System.Array.Resize<float>(ref samples, numSamples * numChannels);
+            }
+            
+            var dataPtr = UnsafeUtility.PinGCArrayAndGetDataAddress(data, out var handleData);
+            var samplesPtr = UnsafeUtility.PinGCArrayAndGetDataAddress(samples, out var handleSamples);
+            
+            BurstMethods.InterleavedToPlanar((float*)dataPtr, (float*)samplesPtr, numChannels, numSamples);
+
+            UnsafeUtility.ReleaseGCObject(handleData);
+            UnsafeUtility.ReleaseGCObject(handleSamples);
+            
+            fixed (float* p = samples)
+            {
+                //PluginEntry.SetAudioData(_plugin, (IntPtr)p);
+                var frame = new Interop.AudioFrame
+                {
+                    SampleRate = sampleRate,
+                    NoChannels = channels,
+                    NoSamples = numSamples,
+                    ChannelStrideInBytes = numSamples * sizeof(float),
+                    Data = (System.IntPtr)p
+                };
+
+                if (_send != null)
+                {
+                    if (!_send.IsClosed && !_send.IsInvalid)
+                        _send.SendAudio(frame);
+                }
+            }
+
+            //if (audioEnabled && pluginReady) PluginEntry.SendAudio(_plugin);
+        }
+    }
+
+    #endregion    
 
     #region Capture coroutine for the Texture/GameView capture methods
 
@@ -62,8 +452,16 @@ public sealed partial class NdiSender : MonoBehaviour
     {
         for (var eof = new WaitForEndOfFrame(); true;)
         {
+        #if !UNITY_ANDROID || UNITY_EDITOR
             // Wait for the end of the frame.
             yield return eof;
+        #else
+            // Temporary workaround for glitches on Android:
+            // Process the input at the beginning of the frame instead of EoF.
+            // I don't know why these glitches occur, but this change solves
+            // them anyway. I should investigate them further if they reappear.
+            yield return null;
+        #endif
 
             PrepareSenderObjects();
 
@@ -139,14 +537,17 @@ public sealed partial class NdiSender : MonoBehaviour
         }
 
         // Frame data
+        // Frame data setup
         var frame = new Interop.VideoFrame
-          { Width       = entry.Width,
-            Height      = entry.Height,
-            LineStride  = entry.Stride,
-            FourCC      = entry.FourCC,
+        {
+            Width = entry.Width,
+            Height = entry.Height,
+            LineStride = entry.Width * 2,
+            FourCC = entry.FourCC,
             FrameFormat = Interop.FrameFormat.Progressive,
-            Data        = entry.ImagePointer,
-            Metadata    = entry.MetadataPointer };
+            Data = entry.ImagePointer,
+            _Metadata = entry.MetadataPointer
+        };
 
         // Async-send initiation
         // This causes a synchronization for the last frame -- i.e., It locks
@@ -165,10 +566,49 @@ public sealed partial class NdiSender : MonoBehaviour
     #region Component state controller
 
     Camera _attachedCamera;
-
+    private float _lastVirtualListenerDistance = -1f;
+    
     // Component state reset without NDI object disposal
     internal void ResetState(bool willBeActive)
     {
+        _audioMode = audioMode;
+        CheckAudioListener(willBeActive);
+        
+        if (audioMode != AudioMode.CustomVirtualAudioSetup)
+            ClearVirtualSpeakerListeners();
+
+        _lastVirtualListenerDistance = virtualListenerDistance;
+        switch (audioMode)
+        {
+            case AudioMode.AudioListener:
+                lock (_channelVisualisationsLock)
+                    _channelVisualisations = null;
+                break;
+            case AudioMode.VirtualQuad:
+                CreateAudioSetup_Quad();
+                break;
+            case AudioMode.Virtual5Point1:
+                CreateAudioSetup_5point1();
+                break;
+            case AudioMode.Virtual7Point1:
+                CreateAudioSetup_7point1();
+                break;
+            case AudioMode.Virtual32Array:
+                CreateAudioSetup_32Array();
+                break;
+            case AudioMode.SpeakerConfigAsset:
+                CreateAudioSetup_bySpeakerConfig();
+                break;
+            case AudioMode.ObjectBased:
+                VirtualAudio.UseVirtualAudio = true;
+                VirtualAudio.ActivateObjectBasedAudio(true, maxObjectBasedChannels);
+                break;
+            case AudioMode.CustomVirtualAudioSetup:
+                break;
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+        
         // Camera capture coroutine termination
         // We use this to kill only a single coroutine. It may sound like
         // overkill, but I think there is no side effect in doing so.
@@ -211,6 +651,16 @@ public sealed partial class NdiSender : MonoBehaviour
     // Component state reset with NDI object disposal
     internal void Restart(bool willBeActivate)
     {
+        
+        if (_metaDataPtr != IntPtr.Zero)
+        {
+            Marshal.FreeCoTaskMem(_metaDataPtr);
+            _metaDataPtr = IntPtr.Zero;
+        }
+        
+        sampleRate = AudioSettings.outputSampleRate;
+        
+        // Debug.Log("Driver capabilties: " + AudioSettings.driverCapabilities);
         ResetState(willBeActivate);
         ReleaseSenderObjects();
     }
@@ -224,7 +674,12 @@ public sealed partial class NdiSender : MonoBehaviour
 
     void OnEnable() => ResetState();
     void OnDisable() => Restart(false);
-    void OnDestroy() => Restart(false);
+
+    void OnDestroy()
+    {
+        Restart(false);
+    } 
+        
 
     #endregion
 }

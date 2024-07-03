@@ -1,16 +1,34 @@
+using Klak.Ndi.Audio;
 using UnityEngine;
 
 namespace Klak.Ndi {
 
 public enum CaptureMethod { GameView, Camera, Texture }
 
-public sealed partial class NdiSender : MonoBehaviour
+public sealed partial class NdiSender : MonoBehaviour, IAdmDataProvider
 {
     #region NDI source settings
 
+    public enum AudioMode { 
+        AudioListener, 
+        VirtualQuad,
+        Virtual5Point1, 
+        Virtual7Point1,
+        Virtual32Array,
+        SpeakerConfigAsset,
+        ObjectBased,
+        CustomVirtualAudioSetup
+    }
+    
     [SerializeField] string _ndiName = "NDI Sender";
     string _ndiNameRuntime;
-
+    public bool playCenteredAudioSourcesOnAllSpeakers = true;
+    public AudioMode audioMode = AudioMode.AudioListener;
+    public float virtualListenerDistance = 4;
+    public bool useCameraPositionForVirtualAttenuation = false;
+    public int maxObjectBasedChannels = 32;
+    public SpeakerConfig customSpeakerConfig;
+    
     public string ndiName
       { get => _ndiNameRuntime;
         set => SetNdiName(value); }
@@ -93,16 +111,41 @@ public sealed partial class NdiSender : MonoBehaviour
 
     #if UNITY_EDITOR
     void OnValidate()
+    {
+        if (audioMode != AudioMode.AudioListener)
+        {
+            var spatializerExpectedName = "Dummy Spatializer (NDI)";
+            AudioSettings.SetSpatializerPluginName(spatializerExpectedName);
+            if (AudioSettings.GetSpatializerPluginName() != spatializerExpectedName)
+                Debug.LogWarning("Spatializer plugin not found. If you just installed KlakNDI with Audio Support, please restart Unity. If this issue persists, please report a bug.");
+        }
+
     #else
     void Awake()
-    #endif
     {
+    #endif
         ndiName = _ndiName;
         captureMethod = _captureMethod;
         sourceCamera = _sourceCamera;
     }
 
     #endregion
+    
+    private event AdmDataChangedDelegate _onAdmDataChanged;
+
+    private object _admEventLock = new object();
+    
+    public void RegisterAdmDataChangedEvent(AdmDataChangedDelegate callback)
+    {
+        lock (_admEventLock)
+            _onAdmDataChanged += callback;
+    }
+
+    public void UnregisterAdmDataChangedEvent(AdmDataChangedDelegate callback)
+    {
+        lock (_admEventLock)
+            _onAdmDataChanged -= callback;
+    }
 }
 
 } // namespace Klak.Ndi

@@ -1,8 +1,9 @@
+using System;
 using UnityEngine;
 
 namespace Klak.Ndi {
 
-public sealed partial class NdiReceiver : MonoBehaviour
+public sealed partial class NdiReceiver : MonoBehaviour, IAdmDataProvider
 {
     #region NDI source settings
 
@@ -19,7 +20,15 @@ public sealed partial class NdiReceiver : MonoBehaviour
         _ndiName = _ndiNameRuntime = name;
         Restart();
     }
+    
+    [SerializeField] private Interop.Bandwidth _bandwidth = Interop.Bandwidth.Highest;
 
+    public Interop.Bandwidth bandwidth
+    {
+        get => _bandwidth;
+        set => _bandwidth = value; 
+    }
+    
     #endregion
 
     #region Target settings
@@ -41,6 +50,15 @@ public sealed partial class NdiReceiver : MonoBehaviour
     public string targetMaterialProperty
       { get => _targetMaterialProperty;
         set => _targetMaterialProperty = value; }
+
+    [SerializeField] bool _receiveAudio = true;
+    [SerializeField] AudioSource _audioSource = null;
+    [Tooltip("When receiving more audio channels than the current audio device is capable of , create virtual speakers for each channel.")]
+    [SerializeField] bool _createVirtualSpeakers = true;
+    
+    public AudioSource audioSource
+      { get => _audioSource;
+        set { _audioSource = value; CheckPassthroughAudioSource(); } }
 
     #endregion
 
@@ -69,14 +87,34 @@ public sealed partial class NdiReceiver : MonoBehaviour
     // We use OnValidate on Editor, which also works as an initializer.
     // Player never call it, so we use Awake instead of it.
 
-    #if UNITY_EDITOR
     void OnValidate()
-    #else
-    void Awake()
-    #endif
-      => ndiName = _ndiName;
+    {
+      ndiName = _ndiName;
+    }
 
     #endregion
+
+    #region Audio Settings
+
+    public float virtualSpeakerDistances = 10f;
+    
+    #endregion
+  
+    private event AdmDataChangedDelegate _onAdmDataChanged;
+
+    private object _admEventLock = new object();
+    
+    public void RegisterAdmDataChangedEvent(AdmDataChangedDelegate callback)
+    {
+      lock (_admEventLock)
+        _onAdmDataChanged += callback;
+    }
+
+    public void UnregisterAdmDataChangedEvent(AdmDataChangedDelegate callback)
+    {
+      lock (_admEventLock)
+        _onAdmDataChanged -= callback;
+    }
 }
 
 } // namespace Klak.Ndi

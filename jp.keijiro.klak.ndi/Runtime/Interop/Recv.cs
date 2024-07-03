@@ -45,14 +45,39 @@ public class Recv : SafeHandleZeroOrMinusOneIsInvalid
       => _Create(settings);
 
     public FrameType Capture
-      (out VideoFrame video, IntPtr audio, IntPtr metadata, uint timeout)
-      => _Capture(this, out video, audio, metadata, timeout);
+      (out VideoFrame video, out AudioFrame audio, out MetadataFrame metadata, uint timeout)
+      => _Capture(this, out video, out audio, out metadata, timeout);
 
+    public FrameType CaptureVideoAndMeta
+        (out VideoFrame video, out MetadataFrame metadata, uint timeout)
+        => _CaptureVideo(this, out video, IntPtr.Zero, out metadata, timeout);
+
+    public bool CaptureAudio(out AudioFrame audio, uint timeout)
+    {
+        var t = _CaptureAudio(this, IntPtr.Zero, out audio, IntPtr.Zero, timeout);
+        return t == FrameType.Audio;
+    }
+    
     public void FreeVideoFrame(in VideoFrame frame)
       => _FreeVideo(this, frame);
 
+    public void FreeAudioFrame(in AudioFrame frame)
+        => _FreeAudio(this, frame);
+
+    public void FreeMetadataFrame(in MetadataFrame frame)
+        => _FreeMetadata(this, frame);
+
+    public void FreeString(IntPtr pointer)
+        => _FreeString(this, pointer);
+
     public bool SetTally(in Tally tally)
-      => _SetTally(this, tally);
+        => _SetTally(this, tally);
+
+    public void AudioFrameToInterleaved(ref AudioFrame source, ref AudioFrameInterleaved dest)
+        => _AudioFrameToInterleaved(ref source, ref dest);
+
+    public void AudioFrameFromInterleaved(ref AudioFrameInterleaved source, ref AudioFrame dest)
+        => _AudioFrameFromInterleaved(ref source, ref dest);
 
     #endregion
 
@@ -76,16 +101,37 @@ public class Recv : SafeHandleZeroOrMinusOneIsInvalid
     static extern void _Destroy(IntPtr recv);
 
     [DllImport(Config.DllName, EntryPoint = "NDIlib_recv_capture_v2")]
-    static extern FrameType _Capture
-      (Recv recv, out VideoFrame video,
-       IntPtr audio, IntPtr metadata, uint timeout);
+    static extern FrameType _Capture(Recv recv,
+        out VideoFrame video, out AudioFrame audio, out MetadataFrame metadata, uint timeout);
 
+    [DllImport(Config.DllName, EntryPoint = "NDIlib_recv_capture_v2")]
+    static extern FrameType _CaptureAudio(Recv recv,
+        IntPtr p1, out AudioFrame audio, IntPtr p2, uint timeout);
+    
+    [DllImport(Config.DllName, EntryPoint = "NDIlib_recv_capture_v2")]
+    static extern FrameType _CaptureVideo(Recv recv, out VideoFrame video, IntPtr p1, out MetadataFrame metadata, uint timeout);
+    
     [DllImport(Config.DllName, EntryPoint = "NDIlib_recv_free_video_v2")]
     static extern void _FreeVideo(Recv recv, in VideoFrame data);
+
+    [DllImport(Config.DllName, EntryPoint = "NDIlib_recv_free_audio_v2")]
+    static extern void _FreeAudio(Recv recv, in AudioFrame data);
+
+    [DllImport(Config.DllName, EntryPoint = "NDIlib_recv_free_metadata")]
+    static extern void _FreeMetadata(Recv recv, in MetadataFrame data);
+
+    [DllImport(Config.DllName, EntryPoint = "NDIlib_recv_free_string")]
+    static extern void _FreeString(Recv recv, IntPtr pointer);
 
     [DllImport(Config.DllName, EntryPoint = "NDIlib_recv_set_tally")]
     [return: MarshalAs(UnmanagedType.U1)]
     static extern bool _SetTally(Recv recv, in Tally tally);
+
+    [DllImport(Config.DllName, EntryPoint = "NDIlib_util_audio_to_interleaved_32f_v2")]
+    static extern void _AudioFrameToInterleaved(ref AudioFrame src, ref AudioFrameInterleaved dst);
+
+    [DllImport(Config.DllName, EntryPoint = "NDIlib_util_audio_from_interleaved_32f_v2")]
+    static extern void _AudioFrameFromInterleaved(ref AudioFrameInterleaved src, ref AudioFrame dst);
 
     #endregion
 }
