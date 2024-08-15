@@ -224,6 +224,8 @@ public sealed partial class NdiSender : MonoBehaviour
             _listenerPosition = transform.position;
         }
         
+        VirtualAudio.spatializingCalculationMode = spatializingCalculationMode;
+        
         if (audioOrigin)
             VirtualAudio.AudioOrigin = new Pose(audioOrigin.position, audioOrigin.rotation);
         else
